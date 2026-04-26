@@ -244,3 +244,119 @@ listener.stop()  # важно: остановить listener при заверш
 **Почему QueueHandler:**
 - Рабочий поток не ждёт записи в файл/сеть — только кладёт в очередь
 - Реальная запись происходит в одном фоновом потоке — нет конкуренции за файл
+
+---
+
+## 7. dictConfig — рекомендуемая настройка для приложений
+
+Описывает всю конфигурацию логирования в одном словаре. Легко хранить в `settings.py`, передавать через `.env` и тестировать.
+
+```python
+import logging
+import logging.config
+
+LOGGING_CONFIG = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "formatters": {
+        "standard": {
+            "format": "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            "datefmt": "%Y-%m-%d %H:%M:%S",
+        },
+        "json": {
+            # pip install python-json-logger
+            "()": "pythonjsonlogger.jsonlogger.JsonFormatter",
+            "format": "%(asctime)s %(levelname)s %(name)s %(message)s",
+        },
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "level": "INFO",
+            "formatter": "standard",
+            "stream": "ext://sys.stdout",
+        },
+        "file": {
+            "class": "logging.handlers.RotatingFileHandler",
+            "level": "DEBUG",
+            "formatter": "standard",
+            "filename": "app.log",
+            "maxBytes": 10_485_760,  # 10 MB
+            "backupCount": 5,
+            "encoding": "utf-8",
+        },
+    },
+    "loggers": {
+        "app": {
+            "level": "DEBUG",
+            "handlers": ["console", "file"],
+            "propagate": False,
+        },
+    },
+    "root": {
+        "level": "WARNING",
+        "handlers": ["console"],
+    },
+}
+
+logging.config.dictConfig(LOGGING_CONFIG)
+logger = logging.getLogger("app")
+logger.info("Приложение запущено")
+```
+
+---
+
+## 8. Production Setup
+
+### Docker / Kubernetes
+
+В контейнерной среде **не пишем в файл** — пишем в `stdout/stderr`.  
+Платформа сама собирает логи (Fluentd, Loki, CloudWatch и т.д.).
+
+```python
+import logging, sys
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+    stream=sys.stdout,   # stdout → собирается оркестратором
+)
+```
+
+| Среда       | Куда писать    | Кто собирает          |
+|-------------|----------------|-----------------------|
+| Docker      | stdout/stderr  | Docker log driver     |
+| Kubernetes  | stdout/stderr  | Fluentd / Loki        |
+| VM / Bare   | Файл           | Logrotate / Filebeat  |
+| Cloud       | stdout         | CloudWatch / Stackdriver |
+
+### Добавление request_id
+
+В web-приложениях полезно добавлять `request_id` к каждой записи через `extra` или `LoggerAdapter`:
+
+```python
+import logging
+import uuid
+
+class RequestAdapter(logging.LoggerAdapter):
+    """Добавляет request_id к каждой записи."""
+    def process(self, msg, kwargs):
+        return f"[{self.extra['request_id']}] {msg}", kwargs
+
+base_logger = logging.getLogger("app.api")
+
+# В начале каждого запроса:
+request_id = str(uuid.uuid4())[:8]
+logger = RequestAdapter(base_logger, {"request_id": request_id})
+
+logger.info("Запрос получен")
+logger.warning("Медленный запрос — 2.3s")
+# [a1b2c3d4] Запрос получен
+# [a1b2c3d4] Медленный запрос — 2.3s
+```
+
+### Что не логировать
+
+- Пароли, токены, API-ключи
+- Персональные данные (email, телефон, паспортные данные)
+- Тела запросов без фильтрации (могут содержать секреты)
